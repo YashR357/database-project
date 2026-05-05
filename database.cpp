@@ -7,26 +7,29 @@
 
 using namespace std;
 
-ofstream fio("abc.bin", ios::binary|ios::app);
+ofstream fio;
 ifstream file("abc.bin", ios::binary);
 map<u_int32_t, streampos> index_map;
 
-void read_func();
 void put();
 void get();
 void index_file();
 
 int main() {
     index_file();
-    cout << "Choose action: 1. Put, 2. Get" << endl;
-    string action;
-    cin >> action;
-    if (action == "Put") {
-        put();
-    } else if (action == "Get") {
-        get();
+    
+    while (true) {
+        cout << "Choose action: 1. Put, 2. Get" << endl;
+        string action;
+        cin >> action;
+        if (action == "Put") {
+            put();
+        } else if (action == "Get") {
+            get();
+        } else {
+            return 0;
+        }
     }
-    // read_func();
     return 0;
 }
 
@@ -42,14 +45,6 @@ void index_file() {
     }
 }
 
-void read_func() {
-    if (file.is_open()) {
-        RecordHeader rh;
-        file.read(reinterpret_cast<char*>(&rh), sizeof(rh));
-        cout << rh.key << endl;
-    }
-}
-
 void put() {
     uint32_t key;
     uint32_t value;
@@ -58,8 +53,13 @@ void put() {
     cout << "Type value: ";
     cin >> value;
     RecordHeader rh = {key, value};
-    fio.write(reinterpret_cast<char*>(&rh), sizeof(rh));
-    fio.close();
+    if (!fio.is_open()) {
+        fio.open("abc.bin", ios::binary|ios::app);
+        streampos offset = fio.tellp();
+        fio.write(reinterpret_cast<char*>(&rh), sizeof(rh));
+        index_map[rh.key] = offset;
+        fio.close();
+    }
 }
 
 void get() {
