@@ -2,13 +2,14 @@
 #include <fstream>
 #include <vector>
 #include <map>
+#include <filesystem>
 #include "database.h"
 
 using namespace std;
 
 ofstream fio("abc.bin", ios::binary|ios::app);
 ifstream file("abc.bin", ios::binary);
-map<u_int32_t, int> index;
+map<u_int32_t, streampos> index_map;
 
 void read_func();
 void put();
@@ -30,11 +31,14 @@ int main() {
 }
 
 void index_file() {
-    if (file.is_open()) {
-        RecordHeader rh;
-        file.read(reinterpret_cast<char*>(&rh), sizeof(rh));
+    if (file.is_open() && std::filesystem::file_size("abc.bin") > 0) {
         streampos offset = file.tellg();
-        index.insert(make_pair(rh.key, offset));
+        RecordHeader rh;
+        while (file.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
+            index_map[rh.key] = offset;
+            cout << "offset at: " << offset << " Key is: " << rh.key << " Value is: " << rh.value << endl;
+            offset = file.tellg();
+        }
     }
 }
 
@@ -64,17 +68,15 @@ void get() {
     cin >> key;
     RecordHeader rh;
     int val;
-    bool found = false;
-    while (file.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
-        if (rh.key == key) {
-            val = rh.value;
-            found = true;
-        }
-    }
-    if (found) {
-        cout << "Val is: " << val << endl;
+    if (index_map.count(key) > 0) {
+        streampos offset = index_map.at(key);
+        cout << "Offset for key is: " << offset << endl;
+        file.clear();
+        file.seekg(offset, ios::beg);
+        file.read(reinterpret_cast<char*>(&rh), sizeof(rh));
+        cout << "Key is: " << rh.key << " Value is: " << rh.value << endl;
     } else {
-        cout << "Key not found" << endl;
+        cout << "Value not found." << endl;
     }
-   
+    
 }
