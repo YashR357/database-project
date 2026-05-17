@@ -21,7 +21,7 @@ int main() {
     index_file();
     
     while (true) {
-        cout << "Choose action: 1. Put, 2. Get" << endl;
+        cout << "Choose action: 1. Put, 2. Get, 3. Delete" << endl;
         string action;
         cin >> action;
         if (action == "Put" || action == "p" || action == "P" || action == "1") {
