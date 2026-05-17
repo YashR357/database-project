@@ -50,7 +50,9 @@ int main() {
 }
 
 void index_file() {
-    if (file.is_open() && std::filesystem::file_size("abc.bin") > 0) {
+    if (file.is_open() && std::filesystem::exists("abc.bin") && std::filesystem::file_size("abc.bin") > 0) {
+        file.clear();
+        file.seekg(0, ios::beg);
         streampos offset = file.tellg();
         RecordHeader rh;
         while (file.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
@@ -58,7 +60,11 @@ void index_file() {
             string value(rh.value_size, '\0');
             file.read(&key[0], rh.key_size);
             file.read(&value[0], rh.value_size);
-            index_map[key] = offset;
+            if (rh.deleted == 1) {
+                index_map.erase(key);
+            } else {
+                index_map[key] = offset;
+            }
             offset = file.tellg();
         }
     }
@@ -94,17 +100,25 @@ void get(string key) {
 }
 
 void deleteKey(string key) {
+    auto it = index_map.find(key);
+    if (it == index_map.end()) {
+        cout << "Value not found." << endl;
+        return;
+    }
+
     RecordHeader rh;
-    streampos off = index_map[key];
+    streampos off = it->second;
+    file.clear();
     file.seekg(off, ios::beg);
     file.read(reinterpret_cast<char*>(&rh), sizeof(rh));
     string new_key(rh.key_size, '\0');
     string value(rh.value_size, '\0');
     file.read(&new_key[0], rh.key_size);
     file.read(&value[0], rh.value_size);
-    file.seekg(ios::app);
     rh.deleted = 1;
+    fio.open("abc.bin", ios::binary|ios::app);
     write(rh, new_key, value);
+    fio.close();
     index_map.erase(key);
 }
 
