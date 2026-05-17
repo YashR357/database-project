@@ -1,0 +1,1 @@
+Use g++ -o database database.cpp -std=c++17 and ./database to run
