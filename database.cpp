@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <filesystem>
+#include <regex>
 #include "database.h"
 
 using namespace std;
@@ -27,7 +28,11 @@ bool checksize();
 void flush_memtable();
 void recover();
 set<std::filesystem::path> readsstables();
-void read_in_file(std::filesystem::path filename, map<string, Value> currentMap);
+void read_in_file(const std::filesystem::path& filename, map<string, Value>& currentMap);
+void write_map(const std::filesystem::path& filename, const map<string, Value>& currentMap);
+vector<std::filesystem::path> readsstables_in_id_order();
+int get_sstable_id(const std::filesystem::path& file_path);
+void compact();
 
 
 
@@ -38,7 +43,7 @@ int main() {
     recover();
     
     while (true) {
-        cout << "Choose action: 1. Put, 2. Get, 3. Delete" << endl;
+        cout << "Choose action: 1. Put, 2. Get, 3. Delete, 4. Compact" << endl;
         string action;
         cin >> action;
         if (action == "Put" || action == "p" || action == "P" || action == "1") {
@@ -59,6 +64,9 @@ int main() {
             string key;
             cin >> key;
             deleteKey(key);
+        } else if (action == "Compact" || action == "c" || action == "C" || action == "4") {
+            compact();
+            cout << "Compaction complete." << endl;
         } else {
             return 0;
         }
@@ -184,38 +192,102 @@ void deleteKey(string key) {
 // }
 
 void compact() {
-    set<std::filesystem::path> s = readsstables();
-    map<string, Value> currentMap = {};
-    for (auto it = s.rbegin(); it != s.rend(); ++it) {
-        read_in_file(it, &currentMap);
-        write_map(it, &currentMap);
+    namespace fs = std::filesystem;
+    vector<fs::path> s = readsstables_in_id_order();
+    if (s.empty()) {
+        return;
     }
 
+    map<string, Value> currentMap = {};
+    for (auto it = s.rbegin(); it != s.rend(); ++it) {
+        read_in_file(*it, currentMap);
+    }
+
+    const fs::path dir{"./sstables"};
+    int max_id = get_sstable_id(s.back());
+    const int next_id = max_id + 1;
+    const fs::path target_file = dir / ("sstable_" + to_string(next_id) + ".bin");
+    const fs::path temp_file = dir / ("sstable_" + to_string(next_id) + ".tmp");
+    write_map(temp_file, currentMap);
+
+    for (const auto& old_file : s) {
+        if (old_file != target_file && old_file != temp_file) {
+            fs::remove(old_file);
+        }
+    }
+    fs::rename(temp_file, target_file);
 }
 
-void read_in_file(std::filesystem::path filename, map<string, Value> currentMap) {
-    if (file.is_open() && std::filesystem::exists(filename) && std::filesystem::file_size(filename) > 0) {
-        file.clear();
-        file.seekg(0, ios::beg);
-        streampos offset = file.tellg();
+int get_sstable_id(const std::filesystem::path& file_path) {
+    static const regex sstable_name_pattern(R"(sstable_(\d+)\.bin)");
+    smatch m;
+    const string filename = file_path.filename().string();
+    if (regex_match(filename, m, sstable_name_pattern)) {
+        return stoi(m[1].str());
+    }
+    return -1;
+}
+
+vector<std::filesystem::path> readsstables_in_id_order() {
+    namespace fs = std::filesystem;
+    fs::path p{"./sstables"};
+    vector<fs::path> files;
+    if (!fs::exists(p)) {
+        return files;
+    }
+
+    for (const auto& path : fs::directory_iterator(p)) {
+        if (get_sstable_id(path.path()) >= 0) {
+            files.push_back(path.path());
+        }
+    }
+
+    sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) {
+        return get_sstable_id(a) < get_sstable_id(b);
+    });
+    return files;
+}
+
+void read_in_file(const std::filesystem::path& filename, map<string, Value>& currentMap) {
+    if (std::filesystem::exists(filename) && std::filesystem::file_size(filename) > 0) {
+        ifstream input(filename, ios::binary);
+        if (!input.is_open()) {
+            cerr << "Failed to open sstable: " << filename << endl;
+            return;
+        }
         RecordHeader rh;
-        while (file.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
+        while (input.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
             string key(rh.key_size, '\0');
             string value(rh.value_size, '\0');
-            file.read(&key[0], rh.key_size);
-            file.read(&value[0], rh.value_size);
+            input.read(&key[0], rh.key_size);
+            input.read(&value[0], rh.value_size);
             if (rh.deleted == 1) {
                 currentMap.erase(key);
             } else {
-                currentMap[key] = offset;
+                currentMap[key] = {value, false};
             }
-            offset = file.tellg();
         }
     }
 }
 
-void write_map(std::filesystem::path filename, map<string, Value> currentMap) {
-    
+void write_map(const std::filesystem::path& filename, const map<string, Value>& currentMap) {
+    ofstream out_file(filename, ios::binary | ios::trunc);
+    if (!out_file.is_open()) {
+        cerr << "Failed to open compacted file: " << filename << endl;
+        return;
+    }
+
+    for (const auto& [key, entry] : currentMap) {
+        if (entry.deleted) {
+            continue;
+        }
+        RecordHeader rh{
+            static_cast<uint32_t>(key.size()),
+            static_cast<uint32_t>(entry.value.size()),
+            0
+        };
+        write(out_file, rh, key, entry.value);
+    }
 }
 
 void write(ofstream& outputfile, RecordHeader rh, string key, string value) {
