@@ -5,6 +5,8 @@
 #include <set>
 #include <filesystem>
 #include <regex>
+#include <mutex>
+#include <thread>
 #include "database.h"
 
 using namespace std;
@@ -14,9 +16,10 @@ struct Value {
     bool deleted;
 };
 
-ofstream fio("abc.bin", ios::binary|ios::app);
-ifstream file("abc.bin", ios::binary);
+ofstream fio("wal.bin", ios::binary|ios::app);
+ifstream file("wal.bin", ios::binary);
 map<string, Value> memtable;
+map<string, Value> secondary_memtable;
 int sstableid;
 
 
@@ -34,6 +37,7 @@ void write_map(const std::filesystem::path& filename, const map<string, Value>& 
 vector<std::filesystem::path> readsstables_in_id_order();
 int get_sstable_id(const std::filesystem::path& file_path);
 void compact();
+std::mutex compact_lock;
 
 
 
@@ -67,8 +71,9 @@ int main() {
             cin >> key;
             deleteKey(key);
         } else if (action == "Compact" || action == "c" || action == "C" || action == "4") {
-            compact();
-            cout << "Compaction complete." << endl;
+            std::thread t(compact);
+            t.detach();
+            
         } else {
             return 0;
         }
@@ -84,29 +89,9 @@ int main() {
     return 0;
 }
 
-// void index_file() {
-//     if (file.is_open() && std::filesystem::exists("abc.bin") && std::filesystem::file_size("abc.bin") > 0) {
-//         file.clear();
-//         file.seekg(0, ios::beg);
-//         streampos offset = file.tellg();
-//         RecordHeader rh;
-//         while (file.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
-//             string key(rh.key_size, '\0');
-//             string value(rh.value_size, '\0');
-//             file.read(&key[0], rh.key_size);
-//             file.read(&value[0], rh.value_size);
-//             if (rh.deleted == 1) {
-//                 index_map.erase(key);
-//             } else {
-//                 index_map[key] = offset;
-//             }
-//             offset = file.tellg();
-//         }
-//     }
-// }
 
 void recover() {
-    if (file.is_open() && std::filesystem::exists("abc.bin") && std::filesystem::file_size("abc.bin") > 0) {
+    if (file.is_open() && std::filesystem::exists("wal.bin") && std::filesystem::file_size("wal.bin") > 0) {
         file.clear();
         file.seekg(0, ios::beg);
         RecordHeader rh;
@@ -142,6 +127,7 @@ void put(string key, string value) {
     RecordHeader rh = {(u_int32_t) key.size(),(u_int32_t) value.size(), 0};
     write(fio, rh, key, value);
     memtable[key] = {value, false};
+    cout << memtable.size() << endl;
 }
 
 bool checksize() {
@@ -150,23 +136,33 @@ bool checksize() {
 
 //TODO: Have immutable memtable and mutable memtable so you can swap them and then flush the memtable and the active memtable can continue to serve writes and reads.
 void flush_memtable() {
+    // static std::mutex io_mutex;
+    // {
+    //     std::lock_guard<std::mutex> lk(io_mutex);
+    // }
+    // io_mutex.lock();
+    secondary_memtable = memtable;
+    memtable = {};
+    fio.close();
+    ofstream fio("wal_secondary.bin");
+
     namespace fs = std::filesystem;
     const fs::path dir{"./sstables"};
     fs::create_directories(dir);
     fs::path filename = dir / ("sstable_" + to_string(sstableid++) + ".bin");
+    cout << sstableid << endl;
     ofstream ssio(filename, ios::binary);
     if (!ssio.is_open()) {
         cerr << "Failed to open sstable for write: " << filename << endl;
         return;
     }
-    for (auto &pair : memtable) {
+    for (auto &pair : secondary_memtable) {
         RecordHeader rh;
         rh.key_size = pair.first.size();
         rh.value_size = pair.second.value.size();
         rh.deleted = pair.second.deleted;
         write(ssio, rh, pair.first, pair.second.value);
     }
-    memtable = {};
 }
 
 set<std::filesystem::path> readsstables() {
@@ -242,6 +238,9 @@ void deleteKey(string key) {
 // }
 
 void compact() {
+    if (!compact_lock.try_lock()) {
+        return;
+    }
     namespace fs = std::filesystem;
     vector<fs::path> s = readsstables_in_id_order();
     if (s.empty()) {
@@ -269,6 +268,8 @@ void compact() {
             fs::remove(old_file);
         }
     }
+    cout << "Compaction complete." << endl;
+    compact_lock.unlock();
 }
 
 int get_sstable_id(const std::filesystem::path& file_path) {
