@@ -27,6 +27,7 @@ void write(ofstream& outputfile, RecordHeader rh, string key, string value);
 bool checksize();
 void flush_memtable();
 void recover();
+void initialize_sstableid();
 set<std::filesystem::path> readsstables();
 void read_in_file(const std::filesystem::path& filename, map<string, Value>& currentMap);
 void write_map(const std::filesystem::path& filename, const map<string, Value>& currentMap);
@@ -41,6 +42,7 @@ void compact();
 int main() {
     // index_file();
     recover();
+    initialize_sstableid();
     
     while (true) {
         cout << "Choose action: 1. Put, 2. Get, 3. Delete, 4. Compact" << endl;
@@ -111,8 +113,12 @@ void recover() {
         while (file.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
             string key(rh.key_size, '\0');
             string value(rh.value_size, '\0');
-            file.read(&key[0], rh.key_size);
-            file.read(&value[0], rh.value_size);
+            if (rh.key_size > 0) {
+                file.read(key.data(), rh.key_size);
+            }
+            if (rh.value_size > 0) {
+                file.read(value.data(), rh.value_size);
+            }
             if (rh.deleted == 1) {
                 memtable[key] = {"", true};
             } else {
@@ -120,6 +126,16 @@ void recover() {
             }
         }
     }
+}
+
+void initialize_sstableid() {
+    const vector<std::filesystem::path> files = readsstables_in_id_order();
+    if (files.empty()) {
+        sstableid = 0;
+        return;
+    }
+
+    sstableid = get_sstable_id(files.back()) + 1;
 }
 
 void put(string key, string value) {
@@ -139,6 +155,10 @@ void flush_memtable() {
     fs::create_directories(dir);
     fs::path filename = dir / ("sstable_" + to_string(sstableid++) + ".bin");
     ofstream ssio(filename, ios::binary);
+    if (!ssio.is_open()) {
+        cerr << "Failed to open sstable for write: " << filename << endl;
+        return;
+    }
     for (auto &pair : memtable) {
         RecordHeader rh;
         rh.key_size = pair.first.size();
@@ -163,27 +183,57 @@ set<std::filesystem::path> readsstables() {
 }
 
 
-
 void get(string key) {
-    if (memtable.count(key) > 0 && !memtable[key].deleted) {
-        cout << "Value is: " << memtable[key].value << endl;
-    } else {
-        cout << "Value not found." << endl;
+    auto mem_it = memtable.find(key);
+    if (mem_it != memtable.end()) {
+        if (!mem_it->second.deleted) {
+            cout << "Value is: " << mem_it->second.value << endl;
+        } else {
+            cout << "Value not found." << endl;
+        }
+        return;
     }
-    
+
+    vector<std::filesystem::path> files = readsstables_in_id_order();
+
+    for (auto it = files.rbegin(); it != files.rend(); ++it) {
+        ifstream input(*it, ios::binary);
+        if (!input.is_open()) {
+            continue;
+        }
+
+        RecordHeader rh;
+        while (input.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
+            string file_key(rh.key_size, '\0');
+            string file_value(rh.value_size, '\0');
+            if (rh.key_size > 0) {
+                input.read(file_key.data(), rh.key_size);
+            }
+            if (rh.value_size > 0) {
+                input.read(file_value.data(), rh.value_size);
+            }
+
+            if (file_key == key) {
+                if (rh.deleted == 1) {
+                    cout << "Value not found." << endl;
+                } else {
+                    cout << "Value is: " << file_value << endl;
+                }
+                return;
+            }
+        }
+    }
+
+    cout << "Value not found." << endl;
 }
 
 void deleteKey(string key) {
-    auto it = memtable.find(key);
-    if (it == memtable.end()) {
-        cout << "Value not found." << endl;
-        return;
-    }
-    RecordHeader rh;
-    string new_key(key.size(), '\0');
-    string value(0, '\0');
-    rh.deleted = 1;
-    write(fio, rh, new_key, value);
+    RecordHeader rh{
+        static_cast<uint32_t>(key.size()),
+        0,
+        1
+    };
+    write(fio, rh, key, "");
     memtable[key] = {"", true};
 }
 
@@ -199,23 +249,26 @@ void compact() {
     }
 
     map<string, Value> currentMap = {};
-    for (auto it = s.rbegin(); it != s.rend(); ++it) {
-        read_in_file(*it, currentMap);
+    for (const auto& file : s) {
+        read_in_file(file, currentMap);
     }
 
     const fs::path dir{"./sstables"};
-    int max_id = get_sstable_id(s.back());
-    const int next_id = max_id + 1;
+    const int next_id = get_sstable_id(s.back()) + 1;
     const fs::path target_file = dir / ("sstable_" + to_string(next_id) + ".bin");
     const fs::path temp_file = dir / ("sstable_" + to_string(next_id) + ".tmp");
     write_map(temp_file, currentMap);
 
+    if (!fs::exists(temp_file)) {
+        return;
+    }
+
+    fs::rename(temp_file, target_file);
     for (const auto& old_file : s) {
-        if (old_file != target_file && old_file != temp_file) {
+        if (old_file != target_file) {
             fs::remove(old_file);
         }
     }
-    fs::rename(temp_file, target_file);
 }
 
 int get_sstable_id(const std::filesystem::path& file_path) {
@@ -259,10 +312,14 @@ void read_in_file(const std::filesystem::path& filename, map<string, Value>& cur
         while (input.read(reinterpret_cast<char*>(&rh), sizeof(rh))) {
             string key(rh.key_size, '\0');
             string value(rh.value_size, '\0');
-            input.read(&key[0], rh.key_size);
-            input.read(&value[0], rh.value_size);
+            if (rh.key_size > 0) {
+                input.read(key.data(), rh.key_size);
+            }
+            if (rh.value_size > 0) {
+                input.read(value.data(), rh.value_size);
+            }
             if (rh.deleted == 1) {
-                currentMap.erase(key);
+                currentMap[key] = {"", true};
             } else {
                 currentMap[key] = {value, false};
             }
@@ -292,6 +349,10 @@ void write_map(const std::filesystem::path& filename, const map<string, Value>& 
 
 void write(ofstream& outputfile, RecordHeader rh, string key, string value) {
     outputfile.write(reinterpret_cast<char*>(&rh), sizeof(rh));
-    outputfile.write(reinterpret_cast<char*>(&key[0]), rh.key_size);
-    outputfile.write(reinterpret_cast<char*>(&value[0]), rh.value_size);
+    if (rh.key_size > 0) {
+        outputfile.write(key.data(), rh.key_size);
+    }
+    if (rh.value_size > 0) {
+        outputfile.write(value.data(), rh.value_size);
+    }
 }
